@@ -1,15 +1,20 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <ESP32Servo.h>
 
 // ========================
 // Hardware Pin Mapping
-// (from diagram.json)
 // ========================
-#define BUZZER_PIN     27   // Buzzer on GPIO 27
+#define BUZZER_PIN      27   // Buzzer on GPIO 27
 #define ULTRASONIC_TRIG 25   // HC-SR04 Trigger
 #define ULTRASONIC_ECHO 26  // HC-SR04 Echo
-#define MOTOR_IN1      32   // L298N IN1
-#define MOTOR_IN2      33   // L298N IN2
+#define SERVO_PIN       33   // SG90 Servo Signal on GPIO 33
+
+// ========================
+// Servo Controller
+// ========================
+Servo sg90Servo;
+int currentServoAngle = 0;
 
 // ========================
 // Alert State
@@ -53,23 +58,27 @@ void setup() {
   pinMode(ULTRASONIC_TRIG, OUTPUT);
   pinMode(ULTRASONIC_ECHO, INPUT);
 
-  pinMode(MOTOR_IN1, OUTPUT);
-  pinMode(MOTOR_IN2, OUTPUT);
-  digitalWrite(MOTOR_IN1, LOW);
-  digitalWrite(MOTOR_IN2, LOW);
+  // Setup SG90 Servo on GPIO 33
+  ESP32PWM::allocateTimer(0);
+  ESP32PWM::allocateTimer(1);
+  ESP32PWM::allocateTimer(2);
+  ESP32PWM::allocateTimer(3);
+  sg90Servo.setPeriodHertz(50);           // Standard 50Hz servo
+  sg90Servo.attach(SERVO_PIN, 500, 2400);  // SG90 standard pulse widths (500us to 2400us)
+  sg90Servo.write(0);                     // Default position: 0 degrees (SAFE)
 
   Serial.println("[Init] Buzzer on GPIO 27");
   Serial.println("[Init] Ultrasonic on GPIO 25/26");
-  Serial.println("[Init] Motor on GPIO 32/33");
+  Serial.println("[Init] SG90 Servo on GPIO 33");
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  READY - Send JSON alerts via Serial");
+  Serial.println("  READY - Send JSON alerts or SERVO commands via Serial");
   Serial.println("========================================");
   Serial.println();
-  Serial.println("Expected JSON format:");
-  Serial.println("{\"zone\":\"WARNING|DANGER|CRITICAL|SAFE\",");
-  Serial.println(" \"vibration\":\"single_pulse|pulsed|continuous_high|off\",");
-  Serial.println(" \"sound\":\"on|off\"}");
+  Serial.println("Commands:");
+  Serial.println("  SERVO <0-180>  : Move servo to specified angle");
+  Serial.println("  SERVO_SWEEP    : Run full diagnostic sweep");
+  Serial.println("  JSON format    : {\"cmd\":\"servo\",\"angle\":90}");
   Serial.println();
 }
 
@@ -154,12 +163,17 @@ void handleSerialCommand(String input) {
   }
 
   // Diagnostic commands
-  if (input == "PING" || input == "HCSR04") {
-    testUltrasonicDiagnostics();
+  if (input.startsWith("SERVO ")) {
+    int angle = input.substring(6).toInt();
+    setServoAngle(angle);
     return;
   }
-  if (input == "MOTOR") {
-    testMotorDiagnostics();
+  if (input == "SERVO" || input == "SERVO_SWEEP" || input == "MOTOR") {
+    testServoDiagnostics();
+    return;
+  }
+  if (input == "PING" || input == "HCSR04") {
+    testUltrasonicDiagnostics();
     return;
   }
   if (input == "SCAN_PINS") {
@@ -169,7 +183,7 @@ void handleSerialCommand(String input) {
   if (input == "CHECK_ALL") {
     Serial.println("{\"status\":\"check_all_start\"}");
     testUltrasonicDiagnostics();
-    testMotorDiagnostics();
+    testServoDiagnostics();
     Serial.println("{\"status\":\"check_all_done\"}");
     return;
   }
@@ -192,15 +206,25 @@ void handleSerialCommand(String input) {
         testUltrasonicDiagnostics();
         return;
       }
-      if (cmd == "motor") {
-        testMotorDiagnostics();
+      if (cmd == "servo") {
+        int angle = doc["angle"] | 90;
+        setServoAngle(angle);
+        return;
+      }
+      if (cmd == "sweep" || cmd == "servo_sweep" || cmd == "motor") {
+        testServoDiagnostics();
         return;
       }
       if (cmd == "check_all") {
         testUltrasonicDiagnostics();
-        testMotorDiagnostics();
+        testServoDiagnostics();
         return;
       }
+    }
+
+    // Direct servo angle in JSON
+    if (doc["servo"].is<int>()) {
+      setServoAngle(doc["servo"].as<int>());
     }
 
     // Extract fields (matching communication.py payload)
@@ -222,20 +246,19 @@ void handleSerialCommand(String input) {
     // Acknowledge
     Serial.print("{\"ack\":true,\"zone\":\"");
     Serial.print(currentZone);
-    Serial.print("\",\"worker_id\":");
+    Serial.print("\",\"servo_angle\":");
+    Serial.print(currentServoAngle);
+    Serial.print(",\"worker_id\":");
     Serial.print(workerId);
     Serial.println("}");
 
-    // If SAFE, immediately silence
-    if (currentZone == "SAFE") {
-      setZoneSafe();
-    }
-
-    // Motor feedback for CRITICAL alerts
+    // Servo position & alarm feedback based on safety zone
     if (currentZone == "CRITICAL") {
-      activateMotorVibration();
-    } else {
-      stopMotor();
+      setServoAngle(90);  // 90° deployed critical safety barrier
+    } else if (currentZone == "WARNING") {
+      setServoAngle(45);  // 45° warning caution position
+    } else if (currentZone == "SAFE") {
+      setZoneSafe();
     }
 
     return;
@@ -256,7 +279,7 @@ void setZoneSafe() {
   digitalWrite(BUZZER_PIN, LOW);
   buzzerState = false;
   singlePulseActive = false;
-  stopMotor();
+  setServoAngle(0); // Return servo to safe 0° position
 }
 
 // ========================
@@ -425,33 +448,36 @@ long readUltrasonicDistance() {
 }
 
 // ========================
-// Motor Control & Diagnostics
+// SG90 Servo Control & Diagnostics (GPIO 33)
 // ========================
+void setServoAngle(int angle) {
+  angle = constrain(angle, 0, 180);
+  currentServoAngle = angle;
+  sg90Servo.write(angle);
+  Serial.print("{\"component\":\"servo\",\"pin\":33,\"angle\":");
+  Serial.print(angle);
+  Serial.println(",\"status\":\"OK\"}");
+}
+
 void activateMotorVibration() {
-  digitalWrite(MOTOR_IN1, HIGH);
-  digitalWrite(MOTOR_IN2, LOW);
+  setServoAngle(90);
 }
 
 void stopMotor() {
-  digitalWrite(MOTOR_IN1, LOW);
-  digitalWrite(MOTOR_IN2, LOW);
+  setServoAngle(0);
+}
+
+void testServoDiagnostics() {
+  Serial.println("{\"component\":\"servo\",\"step\":\"diagnostic_start\"}");
+  int testAngles[] = {0, 45, 90, 135, 180, 90, 0};
+  for (int i = 0; i < 7; i++) {
+    int ang = testAngles[i];
+    setServoAngle(ang);
+    delay(500);
+  }
+  Serial.println("{\"component\":\"servo\",\"step\":\"diagnostic_done\"}");
 }
 
 void testMotorDiagnostics() {
-  Serial.println("{\"component\":\"motor\",\"step\":\"forward\",\"in1\":32,\"in2\":33,\"power\":100}");
-  digitalWrite(MOTOR_IN1, HIGH);
-  digitalWrite(MOTOR_IN2, LOW);
-  delay(1500);
-
-  Serial.println("{\"component\":\"motor\",\"step\":\"pause\"}");
-  stopMotor();
-  delay(300);
-
-  Serial.println("{\"component\":\"motor\",\"step\":\"reverse\",\"in1\":32,\"in2\":33,\"power\":100}");
-  digitalWrite(MOTOR_IN1, LOW);
-  digitalWrite(MOTOR_IN2, HIGH);
-  delay(1500);
-
-  stopMotor();
-  Serial.println("{\"component\":\"motor\",\"step\":\"done\",\"status\":\"stopped\"}");
+  testServoDiagnostics();
 }
