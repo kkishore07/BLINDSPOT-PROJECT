@@ -26,10 +26,13 @@ int currentServoAngle = 0;
 int servoDirection = 1;
 unsigned long lastServoStep = 0;
 
-// Speed intervals in ms per degree
-const unsigned long INTERVAL_FAST  = 12; // ~2.1s per 180° sweep (Fast continuous spin)
-const unsigned long INTERVAL_SLOW  = 40; // ~7.2s per 180° sweep (Caution reduced speed)
-const unsigned long INTERVAL_CRAWL = 85; // ~15.3s per 180° sweep (Crawl speed)
+// Dynamic speed configuration (ms per tick & degrees per step)
+unsigned long intervalFast  = 2;   // Fast 2ms tick -> Fast dynamic sweep
+unsigned long intervalSlow  = 25;  // Caution 25ms tick -> ~4.5s per 180° sweep
+unsigned long intervalCrawl = 60;  // Danger crawl 60ms tick -> ~10.8s per 180° sweep
+int stepFast  = 3;                 // 3 degrees per tick (Fast and smooth!)
+int stepSlow  = 1;
+int stepCrawl = 1;
 
 // Forward declarations
 void setServoSpeed(ServoSpeedState speed);
@@ -533,17 +536,21 @@ void updateServoRotation() {
     return; // Complete stop (Emergency brake)
   }
 
-  unsigned long interval = INTERVAL_FAST;
+  unsigned long interval = intervalFast;
+  int stepSize = stepFast;
+
   if (currentServoSpeed == SERVO_SLOW) {
-    interval = INTERVAL_SLOW;
+    interval = intervalSlow;
+    stepSize = stepSlow;
   } else if (currentServoSpeed == SERVO_CRAWL) {
-    interval = INTERVAL_CRAWL;
+    interval = intervalCrawl;
+    stepSize = stepCrawl;
   }
 
   unsigned long now = millis();
   if (now - lastServoStep >= interval) {
     lastServoStep = now;
-    currentServoAngle += servoDirection;
+    currentServoAngle += (servoDirection * stepSize);
 
     if (currentServoAngle >= 180) {
       currentServoAngle = 180;
