@@ -192,10 +192,10 @@ def main():
                     )
 
                 # Top HUD Bar
-                cv2.rectangle(frame, (0, 0), (w, 80), (25, 25, 25), -1)
-                cv2.line(frame, (0, 80), (w, 80), status_color, 3)
+                cv2.rectangle(frame, (0, 0), (w, 110), (25, 25, 25), -1)
+                cv2.line(frame, (0, 110), (w, 110), status_color, 3)
 
-                # HUD Text
+                # HUD Text - Line 1: Sensor Status
                 human_text = f"CAMERA: HUMAN DETECTED ({len(detections)})" if human_detected else "CAMERA: NO HUMAN"
                 human_col = (0, 255, 0) if human_detected else (180, 180, 180)
                 cv2.putText(frame, human_text, (15, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, human_col, 2)
@@ -203,9 +203,19 @@ def main():
                 dist_text = f"HC-SR04: {distance_cm:.1f} cm" if distance_cm > 0 else "HC-SR04: -- cm"
                 cv2.putText(frame, dist_text, (380, 28), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (255, 255, 255), 2)
 
-                # Overall Fused Alert State
+                # HUD Text - Line 2: Overall Fused Alert State
                 fused_text = f"FUSION: [{zone}] - {'BUZZER ALERT ACTIVE' if alarm_active else 'BUZZER OFF'}"
-                cv2.putText(frame, fused_text, (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.7, status_color, 2)
+                cv2.putText(frame, fused_text, (15, 62), cv2.FONT_HERSHEY_SIMPLEX, 0.68, status_color, 2)
+
+                # HUD Text - Line 3: SG90 Servo Dynamic Speed State
+                SERVO_STATUS_MAP = {
+                    "SAFE": ("SERVO D33: SPINNING AT 100% (NORMAL SPEED)", (0, 255, 0)),
+                    "WARNING": ("SERVO D33: REDUCED TO 35% SPEED (CAUTION)", (0, 215, 255)),
+                    "DANGER": ("SERVO D33: REDUCED TO 15% SPEED (CRAWL)", (0, 140, 255)),
+                    "CRITICAL": ("SERVO D33: EMERGENCY STOP - 0% (E-STOP)", (0, 0, 255))
+                }
+                servo_text, servo_col = SERVO_STATUS_MAP.get(zone, ("SERVO D33: UNKNOWN", (200, 200, 200)))
+                cv2.putText(frame, servo_text, (15, 96), cv2.FONT_HERSHEY_SIMPLEX, 0.65, servo_col, 2)
 
                 # Bottom Explanation Bar
                 cv2.rectangle(frame, (0, h - 35), (w, h), (20, 20, 20), -1)

@@ -11,10 +11,29 @@
 #define SERVO_PIN       33   // SG90 Servo Signal on GPIO 33
 
 // ========================
-// Servo Controller
+// Servo Controller & Dynamic Speed States
 // ========================
+enum ServoSpeedState {
+  SERVO_STOPPED = 0,    // 🔴 RED / CRITICAL -> 0% speed (Emergency Stop)
+  SERVO_CRAWL   = 1,    // 🟠 DANGER -> ~15% speed (Extreme Caution)
+  SERVO_SLOW    = 2,    // 🟡 WARNING -> ~35% speed (Reduced Caution Speed)
+  SERVO_FAST    = 3     // 🟢 SAFE -> 100% full operating speed
+};
+
 Servo sg90Servo;
+ServoSpeedState currentServoSpeed = SERVO_FAST;
 int currentServoAngle = 0;
+int servoDirection = 1;
+unsigned long lastServoStep = 0;
+
+// Speed intervals in ms per degree
+const unsigned long INTERVAL_FAST  = 12; // ~2.1s per 180° sweep (Fast continuous spin)
+const unsigned long INTERVAL_SLOW  = 40; // ~7.2s per 180° sweep (Caution reduced speed)
+const unsigned long INTERVAL_CRAWL = 85; // ~15.3s per 180° sweep (Crawl speed)
+
+// Forward declarations
+void setServoSpeed(ServoSpeedState speed);
+void updateServoRotation();
 
 // ========================
 // Alert State
@@ -65,24 +84,32 @@ void setup() {
   ESP32PWM::allocateTimer(3);
   sg90Servo.setPeriodHertz(50);           // Standard 50Hz servo
   sg90Servo.attach(SERVO_PIN, 500, 2400);  // SG90 standard pulse widths (500us to 2400us)
-  sg90Servo.write(0);                     // Default position: 0 degrees (SAFE)
+  sg90Servo.write(0);                     // Start at 0 degrees
+  currentServoAngle = 0;
+  servoDirection = 1;
+  currentServoSpeed = SERVO_FAST;         // START SPINNING IMMEDIATELY AT 100% OPERATING SPEED
+  lastServoStep = millis();
 
   Serial.println("[Init] Buzzer on GPIO 27");
   Serial.println("[Init] Ultrasonic on GPIO 25/26");
-  Serial.println("[Init] SG90 Servo on GPIO 33");
+  Serial.println("[Init] SG90 Servo on GPIO 33 (SPINNING: FAST 100%)");
   Serial.println();
   Serial.println("========================================");
-  Serial.println("  READY - Send JSON alerts or SERVO commands via Serial");
+  Serial.println("  READY - Dynamic Speed Servo System Active");
   Serial.println("========================================");
-  Serial.println();
-  Serial.println("Commands:");
-  Serial.println("  SERVO <0-180>  : Move servo to specified angle");
-  Serial.println("  SERVO_SWEEP    : Run full diagnostic sweep");
-  Serial.println("  JSON format    : {\"cmd\":\"servo\",\"angle\":90}");
+  Serial.println("Rules:");
+  Serial.println("  🟢 SAFE     -> Fast Rotation (100% Speed)");
+  Serial.println("  🟡 WARNING  -> Slow Caution Rotation (35% Speed)");
+  Serial.println("  🟠 DANGER   -> Heavy Crawl Rotation (15% Speed)");
+  Serial.println("  🔴 CRITICAL -> COMPLETE STOP (Emergency Brake / E-STOP)");
+  Serial.println("  🔄 CLEARED  -> Resumes Normal Rotation Automatically");
   Serial.println();
 }
 
 void loop() {
+  // Continuous non-blocking servo rotation update
+  updateServoRotation();
+
   // Read Serial input
   while (Serial.available()) {
     char c = Serial.read();
@@ -162,6 +189,24 @@ void handleSerialCommand(String input) {
     return;
   }
 
+  // Direct Speed commands
+  if (input == "SERVO FAST" || input == "SPEED FAST" || input == "FAST" || input == "RESUME") {
+    setServoSpeed(SERVO_FAST);
+    return;
+  }
+  if (input == "SERVO SLOW" || input == "SPEED SLOW" || input == "SLOW") {
+    setServoSpeed(SERVO_SLOW);
+    return;
+  }
+  if (input == "SERVO CRAWL" || input == "SPEED CRAWL" || input == "CRAWL") {
+    setServoSpeed(SERVO_CRAWL);
+    return;
+  }
+  if (input == "SERVO STOP" || input == "SPEED STOP" || input == "STOP") {
+    setServoSpeed(SERVO_STOPPED);
+    return;
+  }
+
   // Diagnostic commands
   if (input.startsWith("SERVO ")) {
     int angle = input.substring(6).toInt();
@@ -204,6 +249,18 @@ void handleSerialCommand(String input) {
       String cmd = doc["cmd"].as<String>();
       if (cmd == "ping" || cmd == "hcsr04") {
         testUltrasonicDiagnostics();
+        return;
+      }
+      if (cmd == "fast" || cmd == "resume") {
+        setServoSpeed(SERVO_FAST);
+        return;
+      }
+      if (cmd == "slow") {
+        setServoSpeed(SERVO_SLOW);
+        return;
+      }
+      if (cmd == "stop") {
+        setServoSpeed(SERVO_STOPPED);
         return;
       }
       if (cmd == "servo") {
@@ -252,13 +309,19 @@ void handleSerialCommand(String input) {
     Serial.print(workerId);
     Serial.println("}");
 
-    // Servo position & alarm feedback based on safety zone
+    // Dynamic Speed & Stop Control based on Safety Zone:
+    // - SAFE     -> 🟢 Full Speed Spinning (100%)
+    // - WARNING  -> 🟡 Reduced Caution Speed (35%)
+    // - DANGER   -> 🟠 Heavy Crawl Speed (15%)
+    // - CRITICAL -> 🔴 Emergency Stop (0% - Stops completely!)
     if (currentZone == "CRITICAL") {
-      setServoAngle(90);  // 90° deployed critical safety barrier
+      setServoSpeed(SERVO_STOPPED); // Red warning -> Stop completely
+    } else if (currentZone == "DANGER") {
+      setServoSpeed(SERVO_CRAWL);   // Orange danger -> Crawl speed
     } else if (currentZone == "WARNING") {
-      setServoAngle(45);  // 45° warning caution position
+      setServoSpeed(SERVO_SLOW);    // Yellow warning -> Reduced caution speed
     } else if (currentZone == "SAFE") {
-      setZoneSafe();
+      setZoneSafe();                // Green safe / caution cleared -> Full speed spinning!
     }
 
     return;
@@ -279,7 +342,7 @@ void setZoneSafe() {
   digitalWrite(BUZZER_PIN, LOW);
   buzzerState = false;
   singlePulseActive = false;
-  setServoAngle(0); // Return servo to safe 0° position
+  setServoSpeed(SERVO_FAST); // Caution cleared -> Resume full speed spinning!
 }
 
 // ========================
@@ -448,8 +511,52 @@ long readUltrasonicDistance() {
 }
 
 // ========================
-// SG90 Servo Control & Diagnostics (GPIO 33)
 // ========================
+// SG90 Servo Control & Dynamic Speed Rotation (GPIO 33)
+// ========================
+void setServoSpeed(ServoSpeedState speed) {
+  if (currentServoSpeed != speed) {
+    currentServoSpeed = speed;
+    Serial.print("{\"component\":\"servo\",\"pin\":33,\"speed_state\":\"");
+    if (speed == SERVO_FAST) Serial.print("FAST_100%");
+    else if (speed == SERVO_SLOW) Serial.print("SLOW_35%");
+    else if (speed == SERVO_CRAWL) Serial.print("CRAWL_15%");
+    else Serial.print("STOPPED_0%");
+    Serial.print("\",\"angle\":");
+    Serial.print(currentServoAngle);
+    Serial.println("}");
+  }
+}
+
+void updateServoRotation() {
+  if (currentServoSpeed == SERVO_STOPPED) {
+    return; // Complete stop (Emergency brake)
+  }
+
+  unsigned long interval = INTERVAL_FAST;
+  if (currentServoSpeed == SERVO_SLOW) {
+    interval = INTERVAL_SLOW;
+  } else if (currentServoSpeed == SERVO_CRAWL) {
+    interval = INTERVAL_CRAWL;
+  }
+
+  unsigned long now = millis();
+  if (now - lastServoStep >= interval) {
+    lastServoStep = now;
+    currentServoAngle += servoDirection;
+
+    if (currentServoAngle >= 180) {
+      currentServoAngle = 180;
+      servoDirection = -1;
+    } else if (currentServoAngle <= 0) {
+      currentServoAngle = 0;
+      servoDirection = 1;
+    }
+
+    sg90Servo.write(currentServoAngle);
+  }
+}
+
 void setServoAngle(int angle) {
   angle = constrain(angle, 0, 180);
   currentServoAngle = angle;
@@ -460,21 +567,31 @@ void setServoAngle(int angle) {
 }
 
 void activateMotorVibration() {
-  setServoAngle(90);
+  setServoSpeed(SERVO_STOPPED);
 }
 
 void stopMotor() {
-  setServoAngle(0);
+  setServoSpeed(SERVO_FAST);
 }
 
 void testServoDiagnostics() {
   Serial.println("{\"component\":\"servo\",\"step\":\"diagnostic_start\"}");
-  int testAngles[] = {0, 45, 90, 135, 180, 90, 0};
-  for (int i = 0; i < 7; i++) {
-    int ang = testAngles[i];
-    setServoAngle(ang);
-    delay(500);
-  }
+  ServoSpeedState prev = currentServoSpeed;
+
+  // Fast speed test
+  setServoSpeed(SERVO_FAST);
+  delay(2500);
+
+  // Slow speed test
+  setServoSpeed(SERVO_SLOW);
+  delay(3500);
+
+  // Stop test (RED warning)
+  setServoSpeed(SERVO_STOPPED);
+  delay(2000);
+
+  // Resume test (Caution cleared)
+  setServoSpeed(prev);
   Serial.println("{\"component\":\"servo\",\"step\":\"diagnostic_done\"}");
 }
 
